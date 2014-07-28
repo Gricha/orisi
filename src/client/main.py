@@ -75,6 +75,101 @@ def main(args):
   print "%s main2 %s <locktime_minutes> <return_address>" % ( START_COMMAND, client_pubkey )
 
 
+def pricecheck_create(args):
+  if len(args)<5:
+    print "USAGE: `%s pricecheck_create <pubkey_once> <locktime_minutes> <return_address_if_greater> <return_address_if_smaller> <value>`" % START_COMMAND
+    print "- run `%s main` to obtain pubkey_once" % START_COMMAND
+    print "- keep in mind that this is alpha, don't expect oracles to run properly for any extended periods of time"
+    return
+
+  btc = BitcoinClient()
+
+  request = {}
+  client_pubkey = args[0]
+  request['locktime'] = time.time() + int(args[1])*60
+  request['return_if_greater'] = args[2]
+  request['return_if_lesser'] = args[3]
+  request['price'] = float(args[4])
+
+  print "fetching charter url" # hopefully it didn't check between running main1 and main2
+  charter = fetch_charter(CHARTER_URL)
+
+  oracle_pubkeys = []
+  oracle_fees = {}
+  oracle_bms = []
+
+  for o in charter['nodes']:
+    oracle_pubkeys.append(o['pubkey'])
+    oracle_fees[o['address']] = o['fee']
+    oracle_bms.append(o['bm'])
+
+  oracle_fees[charter['org_address']] = charter['org_fee']
+
+  min_sigs = int(ceil(float(len(oracle_pubkeys))/2))
+
+  key_list = [client_pubkey] + oracle_pubkeys
+
+  response = btc.create_multisig_address(min_sigs, key_list)
+  msig_addr = response['address'] # we're using this as an identificator
+  redeemScript = response['redeemScript']
+
+  request['message_id'] = "%s-%s" % (msig_addr, str(randrange(1000000000,9000000000)))
+  request['pubkey_list'] = key_list
+
+  request['miners_fee_satoshi'] = MINERS_FEE
+
+  print "fetching transactions incoming to %s ..." % msig_addr
+
+  # for production purposes you might want to fetch the data using bitcoind, but that's expensive
+  address_json = liburl_wrapper.safe_read("https://blockchain.info/address/%s?format=json" % msig_addr, timeout_time=10)
+  try:
+    address_history = json.loads(address_json)
+  except:
+    print "blockchain.info problem"
+    print address_json
+    return
+
+  prevtxs = []
+  sum_satoshi = 0
+
+  for tx in address_history['txs']:
+    outputs = []
+    if 'out' in tx:
+      outputs = outputs + tx['out']
+    if 'outputs' in tx:
+      outputs = outputs + tx['outputs']
+
+    for vout in tx['out']:
+      print vout
+      if vout['addr'] == msig_addr:
+        prevtx = {
+          'scriptPubKey' : vout['script'],
+          'vout': vout['n'],
+          'txid': tx['hash'],
+          'redeemScript': redeemScript,
+        }
+        sum_satoshi += vout['value']
+        prevtxs.append(prevtx)
+
+  if len(prevtxs) == 0:
+    print "ERROR: couldn't find transactions sending money to %s" % msig_addr
+    return
+
+  request['prevtxs'] = prevtxs
+  request['outputs'] = oracle_fees
+
+  request["req_sigs"] = min_sigs
+  request['operation'] = 'pricecheck_create'
+  request['sum_satoshi'] = sum_satoshi
+
+  bm = BitmessageClient()
+  print "sending: %r" % json.dumps(request)
+  print bm.chan_address
+
+  request_content = json.dumps(request)
+
+  print bm.send_message(bm.chan_address, request['operation'], request_content)
+
 def main2(args):
   if len(args)<3:
     print "USAGE: `%s main2 <pubkey_once> <locktime_minutes> <return_address>`" % START_COMMAND
@@ -246,6 +341,7 @@ OPERATIONS = {
   'wait': wait_sign,
   'txinfo': tx_info,
   'pushtx': pushtx,
+  'pricecheck_create': pricecheck_create,
 }
 
 SHORT_DESCRIPTIONS = {
@@ -254,6 +350,7 @@ SHORT_DESCRIPTIONS = {
   'wait_sign': "waits for a signature",
   'tx_info': 'information about a signed tx',
   'pushtx': 'pushes tx to eligius',
+  'pricecheck_create': 'create pricecheck transaction and pushes it into network',
 }
 
 def help():
@@ -261,6 +358,7 @@ def help():
   for name, desc in SHORT_DESCRIPTIONS.iteritems():
     print "{0} - {1}".format(name, desc)
   print "Learn more by using {0} help functionname".format(START_COMMAND)
+
 
 def main(args):
   if len(args) == 0:
@@ -279,7 +377,6 @@ def main(args):
     operation(args[1:])
   else:
     print "unknown operation, use {} help for possible operations".format(START_COMMAND)
-
 
 
 if __name__=="__main__":
